@@ -1,0 +1,138 @@
+﻿using System;
+using System.Linq;
+using System.Threading.Tasks;
+using System.Windows;
+using System.Windows.Controls;
+using Skua.Core.Interfaces;
+using Skua.Core.Interfaces.Services;
+
+namespace QuestBypasser
+{
+    public partial class MainPluginView : UserControl
+    {
+        private IScriptInterface _bot;
+        private System.Windows.Threading.DispatcherTimer _statusCheckTimer;
+
+        public MainPluginView()
+        {
+            InitializeComponent();
+        }
+
+        public void SetBot(IScriptInterface bot)
+        {
+            _bot = bot;
+            InitializeStatusCheck();
+        }
+
+        private void InitializeStatusCheck()
+        {
+            // Check status immediately
+            RefreshStatus();
+
+            // Setup periodic status check (every 1 second)
+            _statusCheckTimer = new System.Windows.Threading.DispatcherTimer();
+            _statusCheckTimer.Interval = TimeSpan.FromSeconds(1);
+            _statusCheckTimer.Tick += (s, e) => RefreshStatus();
+            _statusCheckTimer.Start();
+        }
+
+        private void RefreshStatus()
+        {
+            if (_bot == null)
+            {
+                UpdateStatus("Status: Bot not initialized.");
+                return;
+            }
+
+            try
+            {
+                bool playerLoggedIn = _bot.Player.LoggedIn;
+                bool playerLoaded = _bot.Player.Loaded;
+                bool mapLoaded = _bot.Map.Loaded;
+
+                if (!playerLoggedIn)
+                {
+                    UpdateStatus("Status: Waiting for player login...");
+                }
+                else if (!playerLoaded)
+                {
+                    UpdateStatus("Status: Waiting for player to load...");
+                }
+                else if (!mapLoaded)
+                {
+                    UpdateStatus("Status: Waiting for map to load...");
+                }
+                else
+                {
+                    UpdateStatus("Status: Ready");
+                }
+            }
+            catch
+            {
+                // Silently catch exceptions during status checks
+            }
+        }
+
+        private void OnUnloaded(object sender, RoutedEventArgs e)
+        {
+            _statusCheckTimer?.Stop();
+            _statusCheckTimer = null;
+        }
+
+        private async void BtnReload_Click(object sender, RoutedEventArgs e)
+        {
+            BtnReload.IsEnabled = false;
+            TxtStatus.Text = "Status: Executing...";
+
+            try
+            {
+                await Task.Run(async () =>
+                {
+                    if (!_bot.Player.LoggedIn || !_bot.Map.Loaded)
+                    {
+                        UpdateStatus("Status: Player or Map not loaded.");
+                        return;
+                    }
+
+                    var mapQuests = _bot.Quests.Tree;
+                    if (mapQuests == null || mapQuests.Count == 0)
+                    {
+                        UpdateStatus("Status: No map quests found.");
+                        return;
+                    }
+
+                    int lastQuestId = mapQuests.Max(q => q.ID);
+
+                    _bot.Log($"Updating Quest ID: {lastQuestId}");
+                    _bot.Quests.UpdateQuest(lastQuestId);
+
+                    await Task.Delay(1500);
+
+                    _bot.Log("Reloading map...");
+                    _bot.Map.Reload();
+
+                    _bot.Wait.ForMapLoad(_bot.Map.Name);
+                    _bot.Wait.ForTrue(() => _bot.Player.Loaded, 30);
+
+                    UpdateStatus($"Status: Updated Quest #{lastQuestId} & Reloaded");
+                });
+            }
+            catch (Exception ex)
+            {
+                UpdateStatus($"Error: {ex.Message}");
+            }
+            finally
+            {
+                BtnReload.IsEnabled = true;
+            }
+        }
+
+        private void UpdateStatus(string message)
+        {
+            Application.Current.Dispatcher.Invoke(() =>
+            {
+                TxtStatus.Text = message;
+            });
+        }
+    }
+}

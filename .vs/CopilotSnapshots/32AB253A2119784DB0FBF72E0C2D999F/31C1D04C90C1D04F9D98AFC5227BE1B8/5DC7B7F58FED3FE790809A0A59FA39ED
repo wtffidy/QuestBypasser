@@ -1,0 +1,221 @@
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading.Tasks;
+using System.Windows;
+using System.Windows.Controls;
+using Skua.Core.Interfaces;
+using Skua.Core.Interfaces.Services;
+
+namespace QuestBypasser
+{
+    public partial class MainPluginView : UserControl
+    {
+        private IScriptInterface _bot;
+        private System.Windows.Threading.DispatcherTimer _statusCheckTimer;
+
+        public MainPluginView()
+        {
+            InitializeComponent();
+        }
+
+        public void SetBot(IScriptInterface bot)
+        {
+            _bot = bot;
+            InitializeStatusCheck();
+            InitializePresets();
+        }
+
+        private void InitializeStatusCheck()
+        {
+            // Check status immediately
+            RefreshStatus();
+
+            // Setup periodic status check (every 1 second)
+            _statusCheckTimer = new System.Windows.Threading.DispatcherTimer();
+            _statusCheckTimer.Interval = TimeSpan.FromSeconds(1);
+            _statusCheckTimer.Tick += (s, e) => RefreshStatus();
+            _statusCheckTimer.Start();
+        }
+
+        private void InitializePresets()
+        {
+            // Get unique map names from presets (first occurrence of each map)
+            var uniqueMaps = new Dictionary<string, int>();
+            foreach (var (map, questId) in QuestPresets.MapSpecific)
+            {
+                if (!uniqueMaps.ContainsKey(map))
+                {
+                    uniqueMaps[map] = questId;
+                }
+            }
+
+            // Populate combo box with presets
+            CmbMapPreset.Items.Clear();
+            CmbMapPreset.Items.Add(new KeyValuePair<string, int>("-- Select a preset --", 0));
+
+            foreach (var (map, questId) in uniqueMaps.OrderBy(x => x.Key))
+            {
+                CmbMapPreset.Items.Add(new KeyValuePair<string, int>(map, questId));
+            }
+
+            CmbMapPreset.SelectedIndex = 0;
+        }
+
+        private void CmbMapPreset_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (CmbMapPreset.SelectedItem is KeyValuePair<string, int> selected)
+            {
+                // Update quest ID textbox with the selected preset's quest ID
+                TxtQuestId.Text = selected.Value.ToString();
+            }
+        }
+
+        private void RefreshStatus()
+        {
+            if (_bot == null)
+            {
+                UpdateStatus("Status: Bot not initialized.");
+                return;
+            }
+
+            try
+            {
+                bool playerLoggedIn = _bot.Player.LoggedIn;
+                bool playerLoaded = _bot.Player.Loaded;
+                bool mapLoaded = _bot.Map.Loaded;
+
+                if (!playerLoggedIn)
+                {
+                    UpdateStatus("Status: Waiting for player login...");
+                }
+                else if (!playerLoaded)
+                {
+                    UpdateStatus("Status: Waiting for player to load...");
+                }
+                else if (!mapLoaded)
+                {
+                    UpdateStatus("Status: Waiting for map to load...");
+                }
+                else
+                {
+                    UpdateStatus("Status: Ready");
+                }
+            }
+            catch
+            {
+                // Silently catch exceptions during status checks
+            }
+        }
+
+        private void OnUnloaded(object sender, RoutedEventArgs e)
+        {
+            _statusCheckTimer?.Stop();
+            _statusCheckTimer = null;
+        }
+
+        private async void BtnReload_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                BtnReload.IsEnabled = false;
+                UpdateStatus("Status: Executing...");
+                _bot?.Log("Quest Bypasser: Button clicked, starting execution...");
+
+                // Parse the quest ID from the textbox
+                if (!int.TryParse(TxtQuestId.Text, out int questId))
+                {
+                    UpdateStatus("Status: Invalid quest ID.");
+                    _bot?.Log("Quest Bypasser: Invalid quest ID entered.");
+                    return;
+                }
+
+                _bot?.Log($"Quest Bypasser: Quest ID parsed: {questId}");
+
+                // Get the selected map name from the preset dropdown
+                string targetMapName = null;
+                if (CmbMapPreset.SelectedItem is KeyValuePair<string, int> selected && selected.Key != "-- Select a preset --")
+                {
+                    targetMapName = selected.Key;
+                    _bot?.Log($"Quest Bypasser: Target map selected: {targetMapName}");
+                }
+
+                // Run the quest bypass operation asynchronously without blocking the UI
+                await Task.Run(async () =>
+                {
+                    try
+                    {
+                        if (!_bot.Player.LoggedIn || !_bot.Map.Loaded || !_bot.Player.Loaded)
+                        {
+                            UpdateStatus("Status: Player or Map not loaded.");
+                            _bot?.Log("Quest Bypasser: Player or map not loaded.");
+                            return;
+                        }
+
+                        // Perform the quest bypass
+                        _bot.Log($"Updating Quest ID: {questId}");
+                        _bot.Quests.UpdateQuest(questId);
+                        _bot?.Log($"Quest Bypasser: UpdateQuest completed for ID: {questId}");
+
+                        await Task.Delay(1500);
+
+                        // If a target map was selected, either reload or join it
+                        if (!string.IsNullOrEmpty(targetMapName))
+                        {
+                            string currentMap = _bot.Map.Name;
+
+                            if (currentMap.Equals(targetMapName, StringComparison.OrdinalIgnoreCase))
+                            {
+                                // Already on the target map, just reload
+                                _bot.Log($"Reloading map: {targetMapName}");
+                                _bot.Map.Reload();
+                            }
+                            else
+                            {
+                                // Not on the target map, join it
+                                _bot.Log($"Joining map: {targetMapName}");
+                                _bot.Player.Goto(targetMapName);
+                            }
+
+                            _bot.Wait.ForMapLoad(targetMapName);
+                        }
+                        else
+                        {
+                            // No specific map selected, just reload current map
+                            _bot.Log("Reloading current map...");
+                            _bot.Map.Reload();
+                            _bot.Wait.ForMapLoad(_bot.Map.Name);
+                        }
+
+                        _bot.Wait.ForTrue(() => _bot.Player.Loaded, 30);
+
+                        UpdateStatus($"Status: Updated Quest #{questId} & Reloaded");
+                        _bot?.Log($"Quest Bypasser: Operation completed successfully.");
+                    }
+                    catch (Exception innerEx)
+                    {
+                        _bot?.Log($"Quest Bypasser: Error during operation: {innerEx.Message}");
+                        UpdateStatus($"Error: {innerEx.Message}");
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                _bot?.Log($"Quest Bypasser: Error in button click: {ex.Message}");
+                UpdateStatus($"Error: {ex.Message}");
+            }
+            finally
+            {
+                BtnReload.IsEnabled = true;
+            }
+        }
+
+        private void UpdateStatus(string message)
+        {
+            Application.Current.Dispatcher.Invoke(() =>
+            {
+                TxtStatus.Text = message;
+            });
+        }
+    }
+}
